@@ -1,4 +1,4 @@
-BlazeLint — Ultra-fast security & style linter built with Rust.
+BlazeLint — fast security & style linter built with Rust.
 Uses parallel processing and atomic writes for maximum performance and safety.
 ## Features: Multi-threaded scan, 
 Security check for API keys, 
