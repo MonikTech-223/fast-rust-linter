@@ -18,3 +18,34 @@ BlazeLint is built on concepts typically reserved for search engines and high-lo
 Ensure you have the Rust toolchain installed, then clone the repository and build:
 ```bash
 cargo build --release
+```
+
+### Basic check
+```bash
+cargo run -- check .
+```
+
+### Check with automatic fixing
+```bash
+cargo run -- check . --fix
+```
+
+### Ignore cache and force re-scan
+```bash
+cargo run -- check . --no-cache
+```
+
+### Standard benchmark run
+```bash
+cargo bench
+```
+
+### Save current performance as a baseline for future comparison
+```bash
+cargo bench -- --save-baseline main
+```
+
+### Compare current code against the saved baseline
+```bash
+cargo bench -- --baseline main
+```
