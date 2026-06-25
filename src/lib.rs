@@ -1,5 +1,4 @@
 use anyhow::Result;
-use bstr::ByteSlice;
 use memchr::memchr_iter;
 use memmap2::Mmap;
 use std::fs::File;
