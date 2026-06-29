@@ -32,13 +32,14 @@ enum Commands {
     },
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct FileCache {
-    mtime: SystemTime,
+    mtime: u64,
     size: u64,
 }
 
 #[derive(Serialize, Deserialize, Default)]
+#[derive(Debug)]
 struct BlazeCache {
     files: HashMap<String, FileCache>,
 }
@@ -80,7 +81,7 @@ fn run_check(path: &str, max_line: usize, fix: bool, no_cache: bool, start: Inst
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file() && is_target_file(e.path()))
-        .map(|e| e.into_path())
+        .map(|e| e.path())
         .collect();
 
     let pb = ProgressBar::new(files.len() as u64);
