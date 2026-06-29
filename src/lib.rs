@@ -242,7 +242,7 @@ pub fn analyze_and_fix(path: &Path, max_line_length: usize, fix: bool) -> Result
             }
 
             // AIR001 deprecated OpenAI API
-            if (contains(trimmed, b"openai.Completion") || contains(trimmed, b"openai.ChatCompletion")) {
+            if (contains(trimmed, b"openai.Completion") || contains(trimmed, b"openai.ChatCompletion") {
                 reports.push(format!("{} {}:{} [{}] deprecated OpenAI API (use openai>=1.0 style)",
                     "⚠".yellow(), path.display(), line_num, "AIR001".cyan()));
             }
