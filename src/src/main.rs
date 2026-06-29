@@ -33,6 +33,7 @@ enum Commands {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug)]
 struct FileCache {
     mtime: u64,
     size: u64,
@@ -80,7 +81,7 @@ fn run_check(path: &str, max_line: usize, fix: bool, no_cache: bool, start: Inst
         .skip_hidden(false)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && is_target_file(e.path()))
+        .filter(|e| e.file_type().is_file() && is_target_file(&e.path()))
         .map(|e| e.path())
         .collect();
 
