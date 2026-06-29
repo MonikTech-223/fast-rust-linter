@@ -98,7 +98,11 @@ fn run_check(path: &str, max_line: usize, fix: bool, no_cache: bool, start: Inst
             Ok(m) => m,
             Err(_) => return,
         };
-        let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let mtime = metadata.modified()
+    .ok()
+    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+    .map(|d| d.as_secs())
+    .unwrap_or(0);
         let size = metadata.len();
         let path_str = file_path.to_string_lossy().to_string();
 
