@@ -12,58 +12,30 @@ pub fn is_target_file(path: &Path) -> bool {
     matches!(ext, "py" | "rs" | "js" | "ts" | "jsx" | "tsx" | "go" | "cpp" | "c" | "cc" | "h" | "java" | "cs")
 }
 
-#[derive(Debug, Clone)]
-pub struct LintReport {
-    pub code: &'static str,
-    pub message: String,
-    pub line: usize,
-    pub col: usize,
-    pub fixable: bool,
-}
-
-impl LintReport {
-    fn format(&self, path: &Path) -> String {
-        format!(
-            "{} {}:{}:{} [{}] {}",
-            if self.fixable { "⚠".yellow() } else { "✖".red() },
-            path.display(),
-            self.line,
-            self.col,
-            self.code.cyan(),
-            self.message
-        )
-    }
-}
-
-/// Быстрая проверка: есть ли подстрока в строке (без аллокаций)
 #[inline(always)]
 fn contains(line: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || line.len() < needle.len() { return false; }
     line.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Индекс первого вхождения подстроки
 #[inline(always)]
 fn find_col(line: &[u8], needle: &[u8]) -> usize {
-    if needle.is_empty() { return 0; }
+    if needle.is_empty() { return 1; }
     line.windows(needle.len())
         .position(|w| w == needle)
         .unwrap_or(0) + 1
 }
 
-/// Количество ведущих пробелов
 #[inline(always)]
 fn leading_spaces(line: &[u8]) -> usize {
     line.iter().take_while(|&&b| b == b' ').count()
 }
 
-/// Количество ведущих табов
 #[inline(always)]
 fn leading_tabs(line: &[u8]) -> usize {
     line.iter().take_while(|&&b| b == b'\t').count()
 }
 
-/// Строка без ведущих/хвостовых пробелов (без аллокаций — просто срез)
 #[inline(always)]
 fn trim(line: &[u8]) -> &[u8] {
     let start = line.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(line.len());
@@ -71,7 +43,6 @@ fn trim(line: &[u8]) -> &[u8] {
     if start >= end { b"" } else { &line[start..end] }
 }
 
-/// Проверяем что строка — комментарий Python
 #[inline(always)]
 fn is_py_comment(line: &[u8]) -> bool {
     trim(line).starts_with(b"#")
@@ -97,19 +68,11 @@ pub fn analyze_and_fix(path: &Path, max_line_length: usize, fix: bool) -> Result
     let mmap = unsafe { Mmap::map(&file)? };
     let content = &mmap[..];
 
-    let mut reports: Vec<LintReport> = Vec::new();
+    let mut reports: Vec<String> = Vec::new();
     let mut new_content: Vec<u8> = Vec::with_capacity(content.len());
     let mut needs_fix = false;
     let mut fixed_lines = 0;
 
-    // Состояние для многострочных проверок
-    let mut prev_line: &[u8] = b"";
-    let mut prev_blank = false;
-    let mut blank_count = 0usize;
-    let mut line_num = 0usize;
-    let mut line_start = 0usize;
-
-    // Первый проход — собираем строки
     let mut lines: Vec<&[u8]> = Vec::new();
     let mut line_s = 0;
     for pos in memchr_iter(b'\n', content) {
@@ -120,356 +83,237 @@ pub fn analyze_and_fix(path: &Path, max_line_length: usize, fix: bool) -> Result
         lines.push(&content[line_s..]);
     }
 
-    let total_lines = lines.len();
+    let mut blank_count = 0usize;
+    let mut prev_line: &[u8] = b"";
 
     for (idx, &line) in lines.iter().enumerate() {
-        line_num = idx + 1;
+        let line_num = idx + 1;
         let trimmed = trim(line);
         let is_blank = trimmed.is_empty();
 
-        // ── E501 Длина строки ──────────────────────────────────────────
+        // E501 line too long
         if line.len() > max_line_length {
-            reports.push(LintReport {
-                code: "E501",
-                message: format!("line too long ({} > {})", line.len(), max_line_length),
-                line: line_num, col: max_line_length + 1, fixable: false,
-            });
+            reports.push(format!(
+                "{} {}:{}:{} [{}] line too long ({} > {})",
+                "✖".red(), path.display(), line_num, max_line_length + 1,
+                "E501".cyan(), line.len(), max_line_length
+            ));
         }
 
-        // ── W291/W293 Trailing whitespace ─────────────────────────────
-        let has_trailing = line.last().map(|&b| b == b' ' || b == b'\t').unwrap_or(false)
-            && !line.ends_with(b"\r");
+        // W291/W293 trailing whitespace
+        let has_trailing = line.last().map(|&b| b == b' ' || b == b'\t').unwrap_or(false);
         if has_trailing {
-            let code = if leading_spaces(line) > 0 || leading_tabs(line) > 0 {
-                "W293"
-            } else {
-                "W291"
-            };
-            reports.push(LintReport {
-                code,
-                message: "trailing whitespace".to_string(),
-                line: line_num,
-                col: line.iter().rposition(|&b| b != b' ' && b != b'\t').map(|i| i + 2).unwrap_or(1),
-                fixable: true,
-            });
+            let code = if leading_spaces(line) > 0 { "W293" } else { "W291" };
+            reports.push(format!(
+                "{} {}:{} [{}] trailing whitespace",
+                "⚠".yellow(), path.display(), line_num, code.cyan()
+            ));
         }
 
-        // ── W191 Tab indentation ───────────────────────────────────────
+        // W191 tab indentation
         if leading_tabs(line) > 0 && (is_py(path) || is_js_ts(path)) {
-            reports.push(LintReport {
-                code: "W191",
-                message: "indentation contains tabs".to_string(),
-                line: line_num, col: 1, fixable: false,
-            });
+            reports.push(format!(
+                "{} {}:{} [{}] indentation contains tabs",
+                "⚠".yellow(), path.display(), line_num, "W191".cyan()
+            ));
         }
 
-        // ── E302/E303 Blank lines (Python) ─────────────────────────────
+        // E302/E303 blank lines (Python)
         if is_py(path) {
             if is_blank {
                 blank_count += 1;
             } else {
                 if blank_count > 2 {
-                    reports.push(LintReport {
-                        code: "E303",
-                        message: format!("too many blank lines ({})", blank_count),
-                        line: line_num, col: 1, fixable: false,
-                    });
+                    reports.push(format!(
+                        "{} {}:{} [{}] too many blank lines ({})",
+                        "⚠".yellow(), path.display(), line_num, "E303".cyan(), blank_count
+                    ));
                 }
-                // E302: два пустых перед def/class на верхнем уровне
                 if (trimmed.starts_with(b"def ") || trimmed.starts_with(b"class "))
                     && leading_spaces(line) == 0
                     && blank_count < 2
                     && line_num > 1
                 {
-                    reports.push(LintReport {
-                        code: "E302",
-                        message: "expected 2 blank lines before top-level definition".to_string(),
-                        line: line_num, col: 1, fixable: false,
-                    });
+                    reports.push(format!(
+                        "{} {}:{} [{}] expected 2 blank lines before top-level definition",
+                        "⚠".yellow(), path.display(), line_num, "E302".cyan()
+                    ));
                 }
                 blank_count = 0;
             }
         }
 
-        // ──────────────── Python-специфичные правила ───────────────────
+        // Python rules
         if is_py(path) && !is_blank && !is_py_comment(line) {
 
-            // E711 Comparison to None (== None / != None)
+            // E711 comparison to None
             if contains(trimmed, b"== None") {
-                reports.push(LintReport {
-                    code: "E711",
-                    message: "comparison to None (use 'is None')".to_string(),
-                    line: line_num, col: find_col(line, b"== None"), fixable: true,
-                });
+                reports.push(format!("{} {}:{} [{}] comparison to None (use 'is None')",
+                    "⚠".yellow(), path.display(), line_num, "E711".cyan()));
             }
             if contains(trimmed, b"!= None") {
-                reports.push(LintReport {
-                    code: "E711",
-                    message: "comparison to None (use 'is not None')".to_string(),
-                    line: line_num, col: find_col(line, b"!= None"), fixable: true,
-                });
+                reports.push(format!("{} {}:{} [{}] comparison to None (use 'is not None')",
+                    "⚠".yellow(), path.display(), line_num, "E711".cyan()));
             }
 
-            // E712 Comparison to True/False
+            // E712 comparison to True/False
             if contains(trimmed, b"== True") || contains(trimmed, b"== False") {
-                reports.push(LintReport {
-                    code: "E712",
-                    message: "comparison to True/False (use 'if cond:' or 'if not cond:')".to_string(),
-                    line: line_num, col: 1, fixable: false,
-                });
+                reports.push(format!("{} {}:{} [{}] comparison to True/False (use 'if cond:')",
+                    "⚠".yellow(), path.display(), line_num, "E712".cyan()));
             }
 
-            // E721 type() comparison (use isinstance)
+            // E721 type() comparison
             if contains(trimmed, b"type(") && contains(trimmed, b") ==") {
-                reports.push(LintReport {
-                    code: "E721",
-                    message: "do not compare types, use isinstance()".to_string(),
-                    line: line_num, col: find_col(line, b"type("), fixable: false,
-                });
+                reports.push(format!("{} {}:{} [{}] do not compare types, use isinstance()",
+                    "✖".red(), path.display(), line_num, "E721".cyan()));
             }
 
-            // W605 Invalid escape sequence
-            for seq in [b"\\a", b"\\b", b"\\c", b"\\d", b"\\e", b"\\g",
-                        b"\\h", b"\\i", b"\\j", b"\\k", b"\\l", b"\\m",
-                        b"\\o", b"\\p", b"\\q", b"\\w", b"\\y", b"\\z"].iter() {
-                if contains(trimmed, seq) && !contains(trimmed, b"r\"") && !contains(trimmed, b"r'") {
-                    reports.push(LintReport {
-                        code: "W605",
-                        message: format!("invalid escape sequence '{}'", std::str::from_utf8(seq).unwrap_or("?")),
-                        line: line_num, col: find_col(line, seq), fixable: false,
-                    });
-                    break;
-                }
+            // E401 multiple imports
+            if trimmed.starts_with(b"import ") && contains(trimmed, b", ") {
+                reports.push(format!("{} {}:{} [{}] multiple imports on one line",
+                    "⚠".yellow(), path.display(), line_num, "E401".cyan()));
             }
 
-            // E401 Multiple imports on one line
-            if trimmed.starts_with(b"import ") && contains(trimmed, b", ") && !contains(trimmed, b"from ") {
-                reports.push(LintReport {
-                    code: "E401",
-                    message: "multiple imports on one line".to_string(),
-                    line: line_num, col: 1, fixable: false,
-                });
-            }
-
-            // F401 Unused import placeholder (wildcard import)
+            // F403 wildcard import
             if trimmed.starts_with(b"from ") && contains(trimmed, b"import *") {
-                reports.push(LintReport {
-                    code: "F403",
-                    message: "wildcard import — unable to detect undefined names".to_string(),
-                    line: line_num, col: 1, fixable: false,
-                });
+                reports.push(format!("{} {}:{} [{}] wildcard import",
+                    "⚠".yellow(), path.display(), line_num, "F403".cyan()));
             }
 
-            // E722 Bare except
+            // E722 bare except
             if contains(trimmed, b"except:") {
-                reports.push(LintReport {
-                    code: "E722",
-                    message: "do not use bare 'except'".to_string(),
-                    line: line_num, col: find_col(line, b"except:"), fixable: false,
-                });
+                reports.push(format!("{} {}:{} [{}] do not use bare 'except'",
+                    "✖".red(), path.display(), line_num, "E722".cyan()));
             }
 
-            // B006 Mutable default argument
-            for mutable in [b"=[]".as_ref(), b"={}".as_ref(), b"=set()".as_ref()].iter() {
-                if contains(trimmed, mutable) && trimmed.starts_with(b"def ") {
-                    reports.push(LintReport {
-                        code: "B006",
-                        message: "mutable default argument".to_string(),
-                        line: line_num, col: 1, fixable: false,
-                    });
+            // E741 ambiguous variable names
+            for amb in [b" l =".as_ref(), b" O =".as_ref(), b" I =".as_ref()] {
+                if contains(trimmed, amb) {
+                    reports.push(format!("{} {}:{} [{}] ambiguous variable name (l, O, or I)",
+                        "⚠".yellow(), path.display(), line_num, "E741".cyan()));
                     break;
                 }
             }
 
-            // S105 Hardcoded password/secret
-            for kw in [b"password=".as_ref(), b"secret=".as_ref(), b"api_key=".as_ref(), b"passwd=".as_ref()].iter() {
-                if contains(&line.to_ascii_lowercase(), kw) {
-                    let after = &line[find_col(line, kw) + kw.len() - 1..];
-                    let trimmed_after = trim(after);
-                    if trimmed_after.starts_with(b"\"") || trimmed_after.starts_with(b"'") {
-                        reports.push(LintReport {
-                            code: "S105",
-                            message: "hardcoded password/secret detected".to_string(),
-                            line: line_num, col: find_col(line, kw), fixable: false,
-                        });
+            // B006 mutable default argument
+            if trimmed.starts_with(b"def ") {
+                for mutable in [b"=[]".as_ref(), b"={}".as_ref(), b"=set()".as_ref()] {
+                    if contains(trimmed, mutable) {
+                        reports.push(format!("{} {}:{} [{}] mutable default argument",
+                            "✖".red(), path.display(), line_num, "B006".cyan()));
                         break;
                     }
                 }
             }
 
-            // S106 os.system() call
+            // S105 hardcoded password
+            let line_lower = line.to_ascii_lowercase();
+            for kw in [b"password=".as_ref(), b"secret=".as_ref(), b"api_key=".as_ref(), b"passwd=".as_ref()] {
+                if contains(&line_lower, kw) {
+                    let col = find_col(&line_lower, kw);
+                    if col < line.len() {
+                        let after = &line[col + kw.len() - 1..];
+                        let ta = trim(after);
+                        if ta.starts_with(b"\"") || ta.starts_with(b"'") {
+                            reports.push(format!("{} {}:{} [{}] hardcoded password/secret",
+                                "✖".red(), path.display(), line_num, "S105".cyan()));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // S605 os.system
             if contains(trimmed, b"os.system(") {
-                reports.push(LintReport {
-                    code: "S605",
-                    message: "os.system() call — use subprocess instead".to_string(),
-                    line: line_num, col: find_col(line, b"os.system("), fixable: false,
-                });
+                reports.push(format!("{} {}:{} [{}] os.system() — use subprocess instead",
+                    "✖".red(), path.display(), line_num, "S605".cyan()));
             }
 
-            // E711-подобное: print statement (Python 2 style)
-            if trimmed.starts_with(b"print ") && !contains(trimmed, b"print(") {
-                reports.push(LintReport {
-                    code: "UP001",
-                    message: "print statement (Python 2 style), use print()".to_string(),
-                    line: line_num, col: 1, fixable: true,
-                });
-            }
-
-            // E741 Ambiguous variable names
-            for amb in [b" l =", b" O =", b" I =", b"(l,", b"(O,", b"(I,"].iter() {
-                if contains(trimmed, amb) {
-                    reports.push(LintReport {
-                        code: "E741",
-                        message: "ambiguous variable name (l, O, or I)".to_string(),
-                        line: line_num, col: 1, fixable: false,
-                    });
+            // W605 invalid escape sequences
+            for seq in [b"\\a".as_ref(), b"\\b".as_ref(), b"\\d".as_ref(), b"\\e".as_ref(),
+                        b"\\g".as_ref(), b"\\h".as_ref(), b"\\j".as_ref(), b"\\k".as_ref(),
+                        b"\\m".as_ref(), b"\\o".as_ref(), b"\\p".as_ref(), b"\\q".as_ref(),
+                        b"\\w".as_ref(), b"\\y".as_ref(), b"\\z".as_ref()] {
+                if contains(trimmed, seq) && !contains(trimmed, b"r\"") && !contains(trimmed, b"r'") {
+                    reports.push(format!("{} {}:{} [{}] invalid escape sequence",
+                        "⚠".yellow(), path.display(), line_num, "W605".cyan()));
                     break;
                 }
             }
 
-            // AIR001 Deprecated OpenAI import pattern
-            if contains(trimmed, b"import openai") || contains(trimmed, b"from openai") {
-                // Проверяем старый API стиль
-                if contains(trimmed, b"openai.Completion") || contains(trimmed, b"openai.ChatCompletion") {
-                    reports.push(LintReport {
-                        code: "AIR001",
-                        message: "deprecated OpenAI API call (use openai>=1.0 client style)".to_string(),
-                        line: line_num, col: 1, fixable: false,
-                    });
-                }
+            // AIR001 deprecated OpenAI API
+            if (contains(trimmed, b"openai.Completion") || contains(trimmed, b"openai.ChatCompletion")) {
+                reports.push(format!("{} {}:{} [{}] deprecated OpenAI API (use openai>=1.0 style)",
+                    "⚠".yellow(), path.display(), line_num, "AIR001".cyan()));
             }
 
-            // S106 Leaked API key pattern (sk-...)
+            // S106 leaked API key
             if (contains(trimmed, b"sk-") || contains(trimmed, b"AIza") || contains(trimmed, b"AKIA"))
                 && (contains(trimmed, b"\"") || contains(trimmed, b"'"))
             {
-                reports.push(LintReport {
-                    code: "S106",
-                    message: "possible leaked API key in source code".to_string(),
-                    line: line_num, col: 1, fixable: false,
-                });
+                reports.push(format!("{} {}:{} [{}] possible leaked API key",
+                    "✖".red(), path.display(), line_num, "S106".cyan()));
             }
         }
 
-        // ──────────────── Rust-специфичные правила ─────────────────────
+        // Rust rules
         if is_rust(path) && !is_blank {
-            let t = trimmed;
-
-            // R001 unwrap() без комментария
-            if contains(t, b".unwrap()") && !contains(prev_line, b"// SAFETY") && !contains(prev_line, b"// unwrap") {
-                reports.push(LintReport {
-                    code: "R001",
-                    message: ".unwrap() — consider using '?' or expect()".to_string(),
-                    line: line_num, col: find_col(line, b".unwrap()"), fixable: false,
-                });
+            if contains(trimmed, b".unwrap()") && !contains(prev_line, b"// SAFETY") {
+                reports.push(format!("{} {}:{} [{}] .unwrap() — consider '?' or expect()",
+                    "⚠".yellow(), path.display(), line_num, "R001".cyan()));
             }
-
-            // R002 clone() на больших типах — просто предупреждаем о частом clone
-            if contains(t, b".clone()") {
-                reports.push(LintReport {
-                    code: "R002",
-                    message: ".clone() — ensure this is necessary".to_string(),
-                    line: line_num, col: find_col(line, b".clone()"), fixable: false,
-                });
+            if contains(trimmed, b".clone()") {
+                reports.push(format!("{} {}:{} [{}] .clone() — ensure this is necessary",
+                    "⚠".yellow(), path.display(), line_num, "R002".cyan()));
             }
-
-            // R003 TODO/FIXME/HACK комментарии
-            if contains(t, b"TODO") || contains(t, b"FIXME") || contains(t, b"HACK") {
-                reports.push(LintReport {
-                    code: "R003",
-                    message: "unresolved TODO/FIXME/HACK comment".to_string(),
-                    line: line_num, col: 1, fixable: false,
-                });
+            if contains(trimmed, b"TODO") || contains(trimmed, b"FIXME") || contains(trimmed, b"HACK") {
+                reports.push(format!("{} {}:{} [{}] unresolved TODO/FIXME/HACK",
+                    "⚠".yellow(), path.display(), line_num, "R003".cyan()));
             }
-
-            // R004 panic!() вне тестов
-            if contains(t, b"panic!(") && !contains(t, b"#[test]") {
-                reports.push(LintReport {
-                    code: "R004",
-                    message: "panic!() call — prefer returning Result/Option".to_string(),
-                    line: line_num, col: find_col(line, b"panic!("), fixable: false,
-                });
+            if contains(trimmed, b"panic!(") {
+                reports.push(format!("{} {}:{} [{}] panic!() — prefer Result/Option",
+                    "⚠".yellow(), path.display(), line_num, "R004".cyan()));
             }
-
-            // R005 println! в библиотечном коде (не в main/test)
-            if contains(t, b"println!(") {
-                reports.push(LintReport {
-                    code: "R005",
-                    message: "println!() — consider using a proper logger".to_string(),
-                    line: line_num, col: find_col(line, b"println!("), fixable: false,
-                });
-            }
-
-            // S106 Leaked key
-            if (contains(t, b"sk-") || contains(t, b"AIza") || contains(t, b"AKIA"))
-                && (contains(t, b"\"") || contains(t, b"'"))
+            if (contains(trimmed, b"sk-") || contains(trimmed, b"AIza") || contains(trimmed, b"AKIA"))
+                && (contains(trimmed, b"\"") || contains(trimmed, b"'"))
             {
-                reports.push(LintReport {
-                    code: "S106",
-                    message: "possible leaked API key in source code".to_string(),
-                    line: line_num, col: 1, fixable: false,
-                });
+                reports.push(format!("{} {}:{} [{}] possible leaked API key",
+                    "✖".red(), path.display(), line_num, "S106".cyan()));
             }
         }
 
-        // ──────────────── JS/TS правила ────────────────────────────────
+        // JS/TS rules
         if is_js_ts(path) && !is_blank {
-            let t = trimmed;
-
-            // no-var
-            if t.starts_with(b"var ") {
-                reports.push(LintReport {
-                    code: "NO-VAR",
-                    message: "use 'const' or 'let' instead of 'var'".to_string(),
-                    line: line_num, col: 1, fixable: true,
-                });
+            if trimmed.starts_with(b"var ") {
+                reports.push(format!("{} {}:{} [{}] use 'const' or 'let' instead of 'var'",
+                    "⚠".yellow(), path.display(), line_num, "NO-VAR".cyan()));
             }
-
-            // no-console
-            if contains(t, b"console.log(") || contains(t, b"console.error(") {
-                reports.push(LintReport {
-                    code: "NO-CONSOLE",
-                    message: "unexpected console statement".to_string(),
-                    line: line_num, col: find_col(line, b"console."), fixable: false,
-                });
+            if contains(trimmed, b"console.log(") || contains(trimmed, b"console.error(") {
+                reports.push(format!("{} {}:{} [{}] unexpected console statement",
+                    "⚠".yellow(), path.display(), line_num, "NO-CONSOLE".cyan()));
             }
-
-            // eqeqeq (== вместо ===)
-            if contains(t, b" == ") && !contains(t, b" === ") && !contains(t, b" !== ") {
-                reports.push(LintReport {
-                    code: "EQEQEQ",
-                    message: "use '===' instead of '=='".to_string(),
-                    line: line_num, col: find_col(line, b" == "), fixable: true,
-                });
+            if contains(trimmed, b" == ") && !contains(trimmed, b" === ") && !contains(trimmed, b"!==") {
+                reports.push(format!("{} {}:{} [{}] use '===' instead of '=='",
+                    "⚠".yellow(), path.display(), line_num, "EQEQEQ".cyan()));
             }
-
-            // TODO/FIXME
-            if contains(t, b"TODO") || contains(t, b"FIXME") {
-                reports.push(LintReport {
-                    code: "NO-TODO",
-                    message: "unresolved TODO/FIXME comment".to_string(),
-                    line: line_num, col: 1, fixable: false,
-                });
+            if contains(trimmed, b"TODO") || contains(trimmed, b"FIXME") {
+                reports.push(format!("{} {}:{} [{}] unresolved TODO/FIXME",
+                    "⚠".yellow(), path.display(), line_num, "NO-TODO".cyan()));
             }
-
-            // S106 Leaked key
-            if (contains(t, b"sk-") || contains(t, b"AIza") || contains(t, b"AKIA"))
-                && (contains(t, b"\"") || contains(t, b"'") || contains(t, b"`"))
+            if (contains(trimmed, b"sk-") || contains(trimmed, b"AIza") || contains(trimmed, b"AKIA"))
+                && (contains(trimmed, b"\"") || contains(trimmed, b"'") || contains(trimmed, b"`"))
             {
-                reports.push(LintReport {
-                    code: "S106",
-                    message: "possible leaked API key in source code".to_string(),
-                    line: line_num, col: 1, fixable: false,
-                });
+                reports.push(format!("{} {}:{} [{}] possible leaked API key",
+                    "✖".red(), path.display(), line_num, "S106".cyan()));
             }
         }
 
-        // ── Фиксы ──────────────────────────────────────────────────────
+        // Fix phase
         if fix {
             let mut fixed_line: Vec<u8> = line.to_vec();
             let mut line_fixed = false;
 
-            // Убираем trailing whitespace
+            // Remove trailing whitespace
             if has_trailing {
                 while fixed_line.last().map(|&b| b == b' ' || b == b'\t').unwrap_or(false) {
                     fixed_line.pop();
@@ -477,23 +321,22 @@ pub fn analyze_and_fix(path: &Path, max_line_length: usize, fix: bool) -> Result
                 line_fixed = true;
             }
 
-            // Python: == None → is None
+            // Python: == None -> is None
             if is_py(path) {
                 if let Some(pos) = fixed_line.windows(7).position(|w| w == b"== None") {
                     fixed_line[pos..pos+7].copy_from_slice(b"is None");
                     line_fixed = true;
                 }
                 if let Some(pos) = fixed_line.windows(7).position(|w| w == b"!= None") {
-                    let replacement = b"is not None";
                     let mut new_line = fixed_line[..pos].to_vec();
-                    new_line.extend_from_slice(replacement);
+                    new_line.extend_from_slice(b"is not None");
                     new_line.extend_from_slice(&fixed_line[pos+7..]);
                     fixed_line = new_line;
                     line_fixed = true;
                 }
             }
 
-            // JS: var → let
+            // JS: var -> let
             if is_js_ts(path) && fixed_line.starts_with(b"var ") {
                 fixed_line[0..4].copy_from_slice(b"let ");
                 line_fixed = true;
@@ -510,16 +353,12 @@ pub fn analyze_and_fix(path: &Path, max_line_length: usize, fix: bool) -> Result
 
         new_content.push(b'\n');
         prev_line = lines[idx];
-        prev_blank = is_blank;
-        line_start = line_start; // unused but kept for clarity
     }
 
-    // Убираем лишний \n в конце если его не было
     if !content.ends_with(b"\n") && new_content.ends_with(b"\n") {
         new_content.pop();
     }
 
-    // Атомарная перезапись
     if fix && needs_fix {
         let parent = path.parent().unwrap_or(Path::new("."));
         let mut tmp = NamedTempFile::new_in(parent)?;
@@ -528,6 +367,5 @@ pub fn analyze_and_fix(path: &Path, max_line_length: usize, fix: bool) -> Result
         tmp.persist(path)?;
     }
 
-    let formatted: Vec<String> = reports.iter().map(|r| r.format(path)).collect();
-    Ok((formatted, fixed_lines))
+    Ok((reports, fixed_lines))
 }
